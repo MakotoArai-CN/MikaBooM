@@ -1,0 +1,35 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+MikaBooM
+MikaBooM-*
+
+# Test binary
+*.test
+
+# Output of go coverage
+*.out
+
+# Build directory
+dist/
+build/
+
+# Go workspace file
+go.work
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config (optional, uncomment if you want to ignore config)
+# config.yaml

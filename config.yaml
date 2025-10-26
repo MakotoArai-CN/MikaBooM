@@ -1,0 +1,22 @@
+# Resource Monitor Configuration File
+
+# CPU占用率阈值 (0-100)
+cpu_threshold: 70
+
+# 内存占用率阈值 (0-100)
+memory_threshold: 70
+
+# 是否自启动
+auto_start: true
+
+# 是否显示窗口
+show_window: true
+
+# 更新间隔(秒)
+update_interval: 2
+
+# 通知设置
+notification:
+  enabled: true
+  # 通知冷却时间(秒)，避免频繁通知
+  cooldown: 60
