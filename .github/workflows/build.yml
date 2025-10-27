@@ -1,0 +1,416 @@
+name: Cross-Platform Build with CGO
+
+on:
+  push:
+    branches: [ main, dev ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:  # 允许手动触发
+
+env:
+  GO_VERSION: '1.21'
+  APP_NAME: 'MikaBooM'
+
+jobs:
+  # ============ Linux 平台编译 ============
+  build-linux:
+    name: Build Linux (${{ matrix.arch }})
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false  # 一个失败不影响其他
+      matrix:
+        include:
+          # Linux AMD64
+          - arch: amd64
+            cc: gcc
+            cxx: g++
+            
+          # Linux ARM64
+          - arch: arm64
+            cc: aarch64-linux-gnu-gcc
+            cxx: aarch64-linux-gnu-g++
+            pkg_config_path: /usr/lib/aarch64-linux-gnu/pkgconfig
+            dpkg_arch: arm64
+            packages: gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libgtk-3-dev:arm64 libappindicator3-dev:arm64
+            
+          # Linux ARM32 v7
+          - arch: arm
+            cc: arm-linux-gnueabihf-gcc
+            cxx: arm-linux-gnueabihf-g++
+            goarm: "7"
+            pkg_config_path: /usr/lib/arm-linux-gnueabihf/pkgconfig
+            dpkg_arch: armhf
+            packages: gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf libgtk-3-dev:armhf libappindicator3-dev:armhf
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 获取完整历史用于版本号
+      
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      
+      - name: Install Dependencies (AMD64)
+        if: matrix.arch == 'amd64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libappindicator3-dev \
+            pkg-config \
+            build-essential
+      
+      - name: Install Cross-Compile Dependencies
+        if: matrix.arch != 'amd64'
+        run: |
+          sudo dpkg --add-architecture ${{ matrix.dpkg_arch }}
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.packages }}
+      
+      - name: Build
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
+          GOARM: ${{ matrix.goarm }}
+          CGO_ENABLED: 1
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+          PKG_CONFIG_PATH: ${{ matrix.pkg_config_path }}
+        run: |
+          # 获取版本信息
+          VERSION=${GITHUB_REF_NAME#v}
+          if [[ ! "$VERSION" =~ ^[0-9] ]]; then
+            VERSION="dev-$(git describe --always --dirty)"
+          fi
+          BUILD_DATE=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          COMMIT_HASH=$(git rev-parse --short HEAD)
+          
+          # 计算过期时间（2年后）
+          EXPIRE_DATE=$(date -u -d "+2 years" +"%Y-%m-%d %H:%M:%S")
+          
+          # 构建 LDFLAGS
+          LDFLAGS="-s -w"
+          LDFLAGS="$LDFLAGS -X 'MikaBooM/internal/version.Version=${VERSION}'"
+          LDFLAGS="$LDFLAGS -X 'MikaBooM/internal/version.BuildDate=${BUILD_DATE}'"
+          LDFLAGS="$LDFLAGS -X 'MikaBooM/internal/version.CommitHash=${COMMIT_HASH}'"
+          LDFLAGS="$LDFLAGS -X 'MikaBooM/internal/version.ExpireDate=${EXPIRE_DATE}'"
+          
+          # 编译
+          mkdir -p dist/linux
+          OUTPUT_NAME="${APP_NAME}-linux-${{ matrix.arch }}"
+          if [ "${{ matrix.goarm }}" != "" ]; then
+            OUTPUT_NAME="${OUTPUT_NAME}v${{ matrix.goarm }}"
+          fi
+          
+          go build -v -ldflags="$LDFLAGS" -o "dist/linux/${OUTPUT_NAME}"
+          
+          # 生成构建信息
+          echo "Version: ${VERSION}" > "dist/linux/${OUTPUT_NAME}.info"
+          echo "Build Date: ${BUILD_DATE}" >> "dist/linux/${OUTPUT_NAME}.info"
+          echo "Commit: ${COMMIT_HASH}" >> "dist/linux/${OUTPUT_NAME}.info"
+          echo "Platform: linux/${{ matrix.arch }}" >> "dist/linux/${OUTPUT_NAME}.info"
+          
+          # 文件信息
+          ls -lh "dist/linux/${OUTPUT_NAME}"
+          file "dist/linux/${OUTPUT_NAME}"
+      
+      - name: Test Binary
+        if: matrix.arch == 'amd64'  # 只在本地架构测试
+        run: |
+          chmod +x dist/linux/${APP_NAME}-linux-${{ matrix.arch }}
+          dist/linux/${APP_NAME}-linux-${{ matrix.arch }} --version || echo "Version flag not implemented"
+      
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: linux-${{ matrix.arch }}${{ matrix.goarm && format('v{0}', matrix.goarm) || '' }}
+          path: |
+            dist/linux/*
+          retention-days: 7
+
+  # ============ Windows 平台编译 ============
+  build-windows:
+    name: Build Windows (${{ matrix.arch }})
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Windows AMD64
+          - arch: amd64
+            cc: x86_64-w64-mingw32-gcc
+            cxx: x86_64-w64-mingw32-g++
+            
+          # Windows 386
+          - arch: "386"
+            cc: i686-w64-mingw32-gcc
+            cxx: i686-w64-mingw32-g++
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      
+      - name: Install MinGW
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-mingw-w64 g++-mingw-w64
+      
+      - name: Build
+        env:
+          GOOS: windows
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: 1
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          if [[ ! "$VERSION" =~ ^[0-9] ]]; then
+            VERSION="dev-$(git describe --always --dirty)"
+          fi
+          BUILD_DATE=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          COMMIT_HASH=$(git rev-parse --short HEAD)
+          EXPIRE_DATE=$(date -u -d "+2 years" +"%Y-%m-%d %H:%M:%S")
+          
+          LDFLAGS="-s -w -H=windowsgui"
+          LDFLAGS="$LDFLAGS -X 'MikaBooM/internal/version.Version=${VERSION}'"
+          LDFLAGS="$LDFLAGS -X 'MikaBooM/internal/version.BuildDate=${BUILD_DATE}'"
+          LDFLAGS="$LDFLAGS -X 'MikaBooM/internal/version.CommitHash=${COMMIT_HASH}'"
+          LDFLAGS="$LDFLAGS -X 'MikaBooM/internal/version.ExpireDate=${EXPIRE_DATE}'"
+          
+          mkdir -p dist/windows
+          OUTPUT_NAME="${APP_NAME}-windows-${{ matrix.arch }}.exe"
+          
+          go build -v -ldflags="$LDFLAGS" -o "dist/windows/${OUTPUT_NAME}"
+          
+          echo "Version: ${VERSION}" > "dist/windows/${OUTPUT_NAME}.info"
+          echo "Build Date: ${BUILD_DATE}" >> "dist/windows/${OUTPUT_NAME}.info"
+          echo "Commit: ${COMMIT_HASH}" >> "dist/windows/${OUTPUT_NAME}.info"
+          echo "Platform: windows/${{ matrix.arch }}" >> "dist/windows/${OUTPUT_NAME}.info"
+          
+          ls -lh "dist/windows/${OUTPUT_NAME}"
+          file "dist/windows/${OUTPUT_NAME}"
+      
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: windows-${{ matrix.arch }}
+          path: |
+            dist/windows/*
+          retention-days: 7
+
+  # ============ macOS 平台编译 ============
+  build-macos:
+    name: Build macOS (${{ matrix.arch }})
+    runs-on: macos-13  # Intel Mac
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS AMD64 (Intel)
+          - arch: amd64
+            
+          # macOS ARM64 (Apple Silicon)
+          - arch: arm64
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      
+      - name: Build
+        env:
+          GOOS: darwin
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: 1
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          if [[ ! "$VERSION" =~ ^[0-9] ]]; then
+            VERSION="dev-$(git describe --always --dirty)"
+          fi
+          BUILD_DATE=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          COMMIT_HASH=$(git rev-parse --short HEAD)
+          
+          # macOS 计算过期时间
+          EXPIRE_DATE=$(date -u -v+2y +"%Y-%m-%d %H:%M:%S")
+          
+          LDFLAGS="-s -w"
+          LDFLAGS="$LDFLAGS -X 'MikaBooM/internal/version.Version=${VERSION}'"
+          LDFLAGS="$LDFLAGS -X 'MikaBooM/internal/version.BuildDate=${BUILD_DATE}'"
+          LDFLAGS="$LDFLAGS -X 'MikaBooM/internal/version.CommitHash=${COMMIT_HASH}'"
+          LDFLAGS="$LDFLAGS -X 'MikaBooM/internal/version.ExpireDate=${EXPIRE_DATE}'"
+          
+          mkdir -p dist/darwin
+          OUTPUT_NAME="${APP_NAME}-darwin-${{ matrix.arch }}"
+          
+          go build -v -ldflags="$LDFLAGS" -o "dist/darwin/${OUTPUT_NAME}"
+          
+          echo "Version: ${VERSION}" > "dist/darwin/${OUTPUT_NAME}.info"
+          echo "Build Date: ${BUILD_DATE}" >> "dist/darwin/${OUTPUT_NAME}.info"
+          echo "Commit: ${COMMIT_HASH}" >> "dist/darwin/${OUTPUT_NAME}.info"
+          echo "Platform: darwin/${{ matrix.arch }}" >> "dist/darwin/${OUTPUT_NAME}.info"
+          
+          ls -lh "dist/darwin/${OUTPUT_NAME}"
+          file "dist/darwin/${OUTPUT_NAME}"
+      
+      - name: Test Binary
+        if: matrix.arch == 'amd64'
+        run: |
+          chmod +x dist/darwin/${APP_NAME}-darwin-${{ matrix.arch }}
+          dist/darwin/${APP_NAME}-darwin-${{ matrix.arch }} --version || echo "Version flag not implemented"
+      
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: darwin-${{ matrix.arch }}
+          path: |
+            dist/darwin/*
+          retention-days: 7
+
+  # ============ 创建发布包 ============
+  package:
+    name: Package Release
+    needs: [build-linux, build-windows, build-macos]
+    runs-on: ubuntu-22.04
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v3
+        with:
+          path: artifacts
+      
+      - name: Display Structure
+        run: |
+          ls -R artifacts/
+      
+      - name: Create Release Archives
+        run: |
+          mkdir -p release
+          cd artifacts
+          
+          # 为每个平台创建压缩包
+          for platform_dir in */; do
+            platform=${platform_dir%/}
+            echo "打包 ${platform}..."
+            
+            cd "${platform}"
+            
+            # 创建 tar.gz
+            tar -czf "../../release/${APP_NAME}-${platform}.tar.gz" *
+            
+            # 创建 zip (Windows友好)
+            zip -r "../../release/${APP_NAME}-${platform}.zip" *
+            
+            cd ..
+          done
+          
+          cd ../release
+          ls -lh
+      
+      - name: Generate SHA256 Checksums
+        run: |
+          cd release
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      
+      - name: Upload Release Assets
+        uses: actions/upload-artifact@v3
+        with:
+          name: release-packages
+          path: release/*
+          retention-days: 30
+      
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: release/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          body: |
+            ## 🎉 MikaBooM ${{ github.ref_name }}
+            
+            ### 📦 下载说明
+            
+            #### Linux
+            - `MikaBooM-linux-amd64` - 64位 x86 (推荐)
+            - `MikaBooM-linux-arm64` - ARM64 (树莓派4/5, 服务器)
+            - `MikaBooM-linux-armv7` - ARM32 v7 (树莓派2/3)
+            
+            #### Windows
+            - `MikaBooM-windows-amd64.exe` - 64位 (推荐)
+            - `MikaBooM-windows-386.exe` - 32位
+            
+            #### macOS
+            - `MikaBooM-darwin-amd64` - Intel Mac
+            - `MikaBooM-darwin-arm64` - Apple Silicon (M1/M2/M3)
+            
+            ### ✅ 所有版本均支持系统托盘 (CGO编译)
+            
+            ### 🔐 校验和
+            下载后请验证 SHA256 校验和：
+            ```bash
+            sha256sum -c SHA256SUMS.txt
+            ```
+            
+            ---
+            
+            **完整更新日志**: ${{ github.event.repository.html_url }}/compare/${{ github.event.before }}...${{ github.ref_name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ============ 编译统计 ============
+  summary:
+    name: Build Summary
+    needs: [build-linux, build-windows, build-macos]
+    runs-on: ubuntu-22.04
+    if: always()
+    
+    steps:
+      - name: Check Build Results
+        run: |
+          echo "## 📊 构建结果总结" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| 平台 | 状态 |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Linux AMD64 | ${{ needs.build-linux.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Linux ARM64 | ${{ needs.build-linux.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Linux ARMv7 | ${{ needs.build-linux.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Windows AMD64 | ${{ needs.build-windows.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Windows 386 | ${{ needs.build-windows.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| macOS AMD64 | ${{ needs.build-macos.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| macOS ARM64 | ${{ needs.build-macos.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ needs.build-linux.result }}" = "success" ] && \
+             [ "${{ needs.build-windows.result }}" = "success" ] && \
+             [ "${{ needs.build-macos.result }}" = "success" ]; then
+            echo "✅ **所有平台编译成功！**" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ **部分平台编译失败**" >> $GITHUB_STEP_SUMMARY
+          fi

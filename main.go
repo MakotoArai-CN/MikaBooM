@@ -7,6 +7,7 @@ import (
 	"MikaBooM/internal/notify"
 	"MikaBooM/internal/sysinfo"
 	"MikaBooM/internal/tray"
+	"MikaBooM/internal/updater"
 	"MikaBooM/internal/version"
 	"MikaBooM/internal/worker"
 	"flag"
@@ -30,6 +31,7 @@ var (
 	showVersion      = flag.Bool("v", false, "显示版本信息")
 	showHelp         = flag.Bool("h", false, "显示帮助信息")
 	configFile       = flag.String("c", "", "指定配置文件路径")
+	checkUpdate      = flag.Bool("update", false, "检查并更新到最新版本")
 )
 
 func main() {
@@ -51,30 +53,31 @@ func main() {
 		return
 	}
 
-	// 查找配置文件
+	// 处理更新
+	if *checkUpdate {
+		handleUpdate()
+		return
+	}
+
 	cfgPath, err := config.FindConfigFile(*configFile)
 	if err != nil {
 		color.Red("✗ 查找配置文件失败: %v", err)
 		log.Fatalf("查找配置文件失败: %v", err)
 	}
 
-	// 检查配置文件是否存在
 	configExists := config.ConfigExists(cfgPath)
-	
-	// 加载配置（如果不存在会自动创建）
+
 	cfg, err := config.LoadConfig(cfgPath)
 	if err != nil {
 		color.Red("✗ 加载配置文件失败: %v", err)
 		log.Fatalf("加载配置文件失败: %v", err)
 	}
 
-	// 验证配置
 	if err := config.ValidateConfig(cfg); err != nil {
 		color.Red("✗ 配置验证失败: %v", err)
 		log.Fatalf("配置验证失败: %v", err)
 	}
 
-	// 显示配置文件信息
 	if !configExists {
 		color.Green("✓ 配置文件不存在，已创建默认配置文件")
 		color.Cyan("  路径: %s", cfgPath)
@@ -86,15 +89,16 @@ func main() {
 		}
 	}
 
-	// 命令行参数优先级高于配置文件
 	if *cpuThreshold >= 0 {
 		cfg.CPUThreshold = *cpuThreshold
 		color.Yellow("⚙️  命令行参数覆盖: CPU阈值 = %d%%", cfg.CPUThreshold)
 	}
+
 	if *memThreshold >= 0 {
 		cfg.MemoryThreshold = *memThreshold
 		color.Yellow("⚙️  命令行参数覆盖: 内存阈值 = %d%%", cfg.MemoryThreshold)
 	}
+
 	if *showWindow != "" {
 		switch *showWindow {
 		case "true", "1", "yes", "on":
@@ -108,7 +112,6 @@ func main() {
 		}
 	}
 
-	// 处理自启动设置
 	if *enableAutoStart {
 		if err := autostart.Enable(); err != nil {
 			color.Red("✗ 启用自启动失败: %v", err)
@@ -134,7 +137,6 @@ func main() {
 		return
 	}
 
-	// 如果配置文件中设置了自启动，且当前未启用，则自动启用
 	if cfg.AutoStart {
 		enabled, err := autostart.IsEnabled()
 		if err != nil {
@@ -154,18 +156,20 @@ func main() {
 		}
 	}
 
-	// 设置日志输出
 	if !cfg.ShowWindow {
 		log.SetOutput(io.Discard)
 	}
 
-	// 显示欢迎信息
 	if cfg.ShowWindow {
-		fmt.Println() // 空行分隔
+		fmt.Println()
 		showWelcome(cfg)
 	}
 
-	// 检查版本有效性
+	// 启动时检查更新
+	if cfg.UpdateCheck.Enabled && cfg.UpdateCheck.CheckOnStartup {
+		checkUpdateOnStartup(cfg)
+	}
+
 	versionValid := version.IsValid()
 	if !versionValid {
 		if cfg.ShowWindow {
@@ -179,14 +183,13 @@ func main() {
 		cfg.EnableWorker = false
 	}
 
-	// 初始化监控器
 	cpuMonitor := monitor.NewCPUMonitor()
 	memMonitor := monitor.NewMemoryMonitor()
 	notifier := notify.NewNotifier(cfg.Notification.Enabled, cfg.Notification.Cooldown)
 
-	// 初始化工作器（如果版本有效）
 	var cpuWorker *worker.CPUWorker
 	var memWorker *worker.MemoryWorker
+
 	if versionValid {
 		cpuWorker = worker.NewCPUWorker(cfg.CPUThreshold)
 		memWorker = worker.NewMemoryWorker(cfg.MemoryThreshold)
@@ -197,7 +200,7 @@ func main() {
 		}
 	}
 
-		go func() {
+	go func() {
 		tray.Start(cfg, cpuMonitor, memMonitor, cpuWorker, memWorker)
 	}()
 
@@ -206,8 +209,7 @@ func main() {
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-	
-	// 获取托盘退出信号 channel
+
 	trayQuitChan := tray.GetQuitChannel()
 
 	if cfg.ShowWindow {
@@ -317,7 +319,6 @@ func main() {
 			}
 
 		case <-sigChan:
-			// 收到系统信号（Ctrl+C）
 			if cfg.ShowWindow {
 				color.Cyan("📡 接收到退出信号，正在清理...")
 			}
@@ -333,7 +334,6 @@ func main() {
 			return
 
 		case <-trayQuitChan:
-			// 收到托盘退出信号
 			if cfg.ShowWindow {
 				color.Cyan("📡 从托盘接收到退出信号，正在清理...")
 			}
@@ -349,6 +349,111 @@ func main() {
 			return
 		}
 	}
+}
+
+// checkUpdateOnStartup 启动时检查更新
+func checkUpdateOnStartup(cfg *config.Config) {
+	upd := updater.NewUpdater(version.GetVersion())
+
+	// 静默检查更新
+	release, hasUpdate, err := upd.CheckUpdateSilent()
+	if err != nil {
+		// 静默失败，不显示错误
+		return
+	}
+
+	if hasUpdate {
+		if !cfg.UpdateCheck.SilentCheck {
+			updater.ShowUpdateNotice(release, version.GetVersion())
+		}
+	} else {
+		if !cfg.UpdateCheck.SilentCheck && cfg.ShowWindow {
+			color.Green("✓ 当前已是最新版本 v%s", version.GetVersion())
+			fmt.Println()
+		}
+	}
+}
+
+// handleUpdate 处理更新逻辑
+func handleUpdate() {
+	color.Cyan("╔════════════════════════════════════════════════╗")
+	color.Cyan("║           🔄 MikaBooM 更新检查                  ║")
+	color.Cyan("╚════════════════════════════════════════════════╝")
+	fmt.Println()
+
+	upd := updater.NewUpdater(version.GetVersion())
+
+	// 检查更新
+	color.Cyan("🔍 正在检查更新...")
+	color.Cyan("📡 仓库地址: %s", updater.GitHubRepo)
+	fmt.Println()
+
+	release, hasUpdate, err := upd.CheckUpdate()
+	if err != nil {
+		color.Red("✗ 检查更新失败: %v", err)
+		fmt.Println()
+		color.Yellow("请检查:")
+		color.Yellow("  1. 网络连接是否正常")
+		color.Yellow("  2. 是否可以访问 GitHub")
+		color.Yellow("  3. 防火墙是否拦截")
+		os.Exit(1)
+	}
+
+	if !hasUpdate {
+		color.Green("✓ 已是最新版本 v%s", version.GetVersion())
+		fmt.Println()
+		color.Cyan("当前版本信息:")
+		color.Cyan("  版本号: v%s", version.GetVersion())
+		color.Cyan("  编译日期: %s", version.GetBuildDate())
+		color.Cyan("  有效期至: %s", version.GetExpireDate())
+		fmt.Println()
+		return
+	}
+
+	// 显示更新信息
+	updater.ShowUpdateInfo(release, version.GetVersion())
+
+	// 询问是否更新
+	fmt.Print("是否立即更新？[Y/n]: ")
+	var answer string
+	fmt.Scanln(&answer)
+
+	if answer != "" && answer != "Y" && answer != "y" && answer != "yes" {
+		color.Yellow("已取消更新")
+		return
+	}
+
+	fmt.Println()
+
+	// 执行更新
+	if err := upd.PerformUpdate(release); err != nil {
+		color.Red("✗ 更新失败: %v", err)
+		fmt.Println()
+		color.Yellow("可能的原因:")
+		color.Yellow("  1. 网络连接中断")
+		color.Yellow("  2. 权限不足（尝试使用管理员权限运行）")
+		color.Yellow("  3. 磁盘空间不足")
+		os.Exit(1)
+	}
+
+	color.Green("╔════════════════════════════════════════════════╗")
+	color.Green("║           ✅ 更新成功！                         ║")
+	color.Green("╚════════════════════════════════════════════════╝")
+	fmt.Println()
+
+	// 询问是否重启
+	fmt.Print("是否立即重启程序？[Y/n]: ")
+	fmt.Scanln(&answer)
+
+	if answer == "" || answer == "Y" || answer == "y" || answer == "yes" {
+		if err := upd.Restart(); err != nil {
+			color.Red("✗ 重启失败: %v", err)
+			color.Yellow("请手动重启程序")
+		}
+		os.Exit(0)
+	}
+
+	color.Cyan("请手动重启程序以使用新版本")
 }
 
 func showWelcome(cfg *config.Config) {
@@ -367,7 +472,6 @@ func showWelcome(cfg *config.Config) {
 	color.New(color.FgHiCyan).Printf("⚙️  内存阈值: %d%%\n", cfg.MemoryThreshold)
 	color.New(color.FgHiCyan).Printf("⚙️  窗口模式: %s\n", getWindowModeText(cfg.ShowWindow))
 
-	// 显示自启动状态
 	enabled, err := autostart.IsEnabled()
 	if err == nil {
 		if enabled {
@@ -461,6 +565,10 @@ func showHelpInfo() {
 	fmt.Println("                      未指定时自动使用可执行文件同级目录下的 config.yaml")
 	fmt.Println("                      示例: -c /path/to/config.yaml")
 	fmt.Println()
+	fmt.Println("  -update             检查并更新到最新版本")
+	fmt.Println("                      从 GitHub 仓库自动下载并安装更新")
+	fmt.Println("                      支持所有平台的自动更新")
+	fmt.Println()
 	fmt.Println("  -v                  显示版本信息")
 	fmt.Println()
 	fmt.Println("  -h                  显示此帮助信息")
@@ -485,11 +593,30 @@ func showHelpInfo() {
 	fmt.Println("  # 使用自定义配置文件")
 	fmt.Println("  MikaBooM -c /path/to/custom-config.yaml")
 	fmt.Println()
-	fmt.Println("  # 使用相对路径的配置文件")
-	fmt.Println("  MikaBooM -c configs/server.yaml")
+	fmt.Println("  # 检查并更新到最新版本")
+	fmt.Println("  MikaBooM -update")
 	fmt.Println()
 	fmt.Println("  # 查看版本信息")
 	fmt.Println("  MikaBooM -v")
+	fmt.Println()
+
+	color.New(color.FgCyan, color.Bold).Println("🔄 更新功能:")
+	fmt.Println("  使用 -update 参数可以自动检查并安装更新:")
+	fmt.Println("    1. 从 GitHub 检测最新版本")
+	fmt.Println("    2. 自动下载适配当前系统的版本")
+	fmt.Println("    3. 安全替换当前可执行文件（自动备份）")
+	fmt.Println("    4. 可选择立即重启程序")
+	fmt.Println()
+	fmt.Println("  启动时自动检查更新:")
+	fmt.Println("    - 可在配置文件中设置 update_check.enabled")
+	fmt.Println("    - 可设置 update_check.check_on_startup")
+	fmt.Println("    - 可设置 update_check.silent_check（静默检查）")
+	fmt.Println()
+	fmt.Println("  更新过程安全可靠:")
+	fmt.Println("    - 下载到内存临时文件")
+	fmt.Println("    - 更新前自动备份原文件")
+	fmt.Println("    - 更新失败自动回滚")
+	fmt.Println("    - 更新后自动清理临时文件")
 	fmt.Println()
 
 	color.New(color.FgCyan, color.Bold).Println("📝 配置文件:")
@@ -509,6 +636,10 @@ func showHelpInfo() {
 	fmt.Println("    - notification       通知设置")
 	fmt.Println("      - enabled          是否启用通知")
 	fmt.Println("      - cooldown         通知冷却时间（秒）")
+	fmt.Println("    - update_check       更新检查设置")
+	fmt.Println("      - enabled          是否启用更新检查")
+	fmt.Println("      - check_on_startup 是否启动时检查")
+	fmt.Println("      - silent_check     是否静默检查")
 	fmt.Println()
 
 	color.New(color.FgMagenta, color.Bold).Println("🔧 配置优先级:")
@@ -525,10 +656,15 @@ func showHelpInfo() {
   update_interval: 2
   notification:
     enabled: true
-    cooldown: 60`)
+    cooldown: 60
+  update_check:
+    enabled: true
+    check_on_startup: true
+    silent_check: false`)
 	fmt.Println()
 
 	color.New(color.FgMagenta).Println("👤 作者: Makoto")
 	color.New(color.FgCyan).Println("📧 项目: MikaBooM - Resource Monitor Miku Edition")
+	color.New(color.FgCyan).Println("🔗 GitHub: https://github.com/MakotoArai-CN/MikaBooM")
 	fmt.Println()
 }

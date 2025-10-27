@@ -1,22 +1,44 @@
-# Resource Monitor Configuration File
+# MikaBooM Resource Monitor Configuration File
+# 系统资源监控与调整工具 - 配置文件
 
 # CPU占用率阈值 (0-100)
+# 当其他程序CPU占用低于此阈值时，本程序会启动CPU计算负载
 cpu_threshold: 70
 
 # 内存占用率阈值 (0-100)
+# 当其他程序内存占用低于此阈值时，本程序会启动内存计算负载
 memory_threshold: 70
 
-# 是否自启动
+# 是否开机自启动
+# true: 启用自启动, false: 禁用自启动
 auto_start: true
 
 # 是否显示窗口
+# true: 显示命令行窗口（前台运行）, false: 隐藏窗口（后台运行）
 show_window: true
 
-# 更新间隔(秒)
+# 监控更新间隔（秒）
+# 建议值: 1-10 秒
 update_interval: 2
 
 # 通知设置
 notification:
+  # 是否启用系统通知
   enabled: true
-  # 通知冷却时间(秒)，避免频繁通知
+  # 通知冷却时间（秒）
+  # 避免频繁通知，相同类型的通知在冷却时间内只会显示一次
   cooldown: 60
+
+# 更新检查设置
+update_check:
+  # 是否启用更新检查功能
+  # true: 启用, false: 禁用
+  enabled: true
+  # 是否在程序启动时自动检查更新
+  # true: 启动时检查, false: 不检查
+  check_on_startup: true
+  # 当前需要手动运行 MikaBooM -update 进行更新
+  auto_download: false
+  # 是否静默检查
+  # true: 仅在有新版本时提示, false: 始终显示检查结果
+  silent_check: false

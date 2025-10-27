@@ -37,19 +37,28 @@ LDFLAGS := -s -w \
 	-X 'MikaBooM/internal/version.ExpireDate=$(EXPIRE_TIME)' \
 	-X 'MikaBooM/internal/version.CommitHash=$(COMMIT_HASH)'
 
+# CGO 设置
+# Windows 不需要 CGO
+# Linux/macOS 需要 CGO 支持系统托盘
+ifeq ($(CURRENT_OS),windows)
+    CGO_ENABLED := 0
+else
+    CGO_ENABLED := 1
+endif
+
 # 默认目标：编译当前系统
 .DEFAULT_GOAL := build-current
 
 # 编译当前系统
 .PHONY: build-current
 build-current: sync-icons
-	@echo "Building for current system ($(CURRENT_OS)/$(CURRENT_ARCH))..."
+	@echo "Building for current system ($(CURRENT_OS)/$(CURRENT_ARCH)) [CGO=$(CGO_ENABLED)]..."
 	@mkdir -p $(OUTPUT_DIR)/$(CURRENT_OS)
 ifeq ($(CURRENT_OS),windows)
-	@$(GOBUILD) -ldflags="$(LDFLAGS)" -o $(OUTPUT_DIR)/$(CURRENT_OS)/$(BINARY_NAME)-$(CURRENT_OS)-$(CURRENT_ARCH).exe
+	@CGO_ENABLED=$(CGO_ENABLED) $(GOBUILD) -ldflags="$(LDFLAGS)" -o $(OUTPUT_DIR)/$(CURRENT_OS)/$(BINARY_NAME)-$(CURRENT_OS)-$(CURRENT_ARCH).exe
 	@echo "Built: $(OUTPUT_DIR)/$(CURRENT_OS)/$(BINARY_NAME)-$(CURRENT_OS)-$(CURRENT_ARCH).exe"
 else
-	@$(GOBUILD) -ldflags="$(LDFLAGS)" -o $(OUTPUT_DIR)/$(CURRENT_OS)/$(BINARY_NAME)-$(CURRENT_OS)-$(CURRENT_ARCH)
+	@CGO_ENABLED=$(CGO_ENABLED) $(GOBUILD) -ldflags="$(LDFLAGS)" -o $(OUTPUT_DIR)/$(CURRENT_OS)/$(BINARY_NAME)-$(CURRENT_OS)-$(CURRENT_ARCH)
 	@echo "Built: $(OUTPUT_DIR)/$(CURRENT_OS)/$(BINARY_NAME)-$(CURRENT_OS)-$(CURRENT_ARCH)"
 endif
 	@echo ""
@@ -114,6 +123,7 @@ prepare:
 build-all: prepare sync-icons build-windows build-linux build-darwin build-bsd build-android
 	@echo ""
 	@echo "All platforms built successfully!"
+	@echo "Note: Linux/macOS binaries may not have tray support if cross-compiled"
 
 # Windows 编译
 .PHONY: build-windows
@@ -127,7 +137,8 @@ build-windows:
 # Linux 编译
 .PHONY: build-linux
 build-linux:
-	@echo "Building Linux..."
+	@echo "🐧 Building Linux..."
+	@echo "Note: Cross-compiling with CGO_ENABLED=0 (tray support disabled)"
 	@GOOS=linux GOARCH=amd64 CGO_ENABLED=0 $(GOBUILD) -ldflags="$(LDFLAGS)" -o $(OUTPUT_DIR)/linux/$(BINARY_NAME)-linux-amd64
 	@GOOS=linux GOARCH=386 CGO_ENABLED=0 $(GOBUILD) -ldflags="$(LDFLAGS)" -o $(OUTPUT_DIR)/linux/$(BINARY_NAME)-linux-386
 	@GOOS=linux GOARCH=arm64 CGO_ENABLED=0 $(GOBUILD) -ldflags="$(LDFLAGS)" -o $(OUTPUT_DIR)/linux/$(BINARY_NAME)-linux-arm64
@@ -146,14 +157,15 @@ build-linux:
 # macOS 编译
 .PHONY: build-darwin
 build-darwin:
-	@echo "Building macOS..."
+	@echo "🍎 Building macOS..."
+	@echo "Note: Cross-compiling with CGO_ENABLED=0 (tray support disabled)"
 	@GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 $(GOBUILD) -ldflags="$(LDFLAGS)" -o $(OUTPUT_DIR)/darwin/$(BINARY_NAME)-darwin-amd64
 	@GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 $(GOBUILD) -ldflags="$(LDFLAGS)" -o $(OUTPUT_DIR)/darwin/$(BINARY_NAME)-darwin-arm64
 
 # BSD 编译
 .PHONY: build-bsd
 build-bsd:
-	@echo "Building BSD..."
+	@echo "👹 Building BSD..."
 	@GOOS=freebsd GOARCH=amd64 CGO_ENABLED=0 $(GOBUILD) -ldflags="$(LDFLAGS)" -o $(OUTPUT_DIR)/freebsd/$(BINARY_NAME)-freebsd-amd64
 	@GOOS=freebsd GOARCH=386 CGO_ENABLED=0 $(GOBUILD) -ldflags="$(LDFLAGS)" -o $(OUTPUT_DIR)/freebsd/$(BINARY_NAME)-freebsd-386
 	@GOOS=freebsd GOARCH=arm64 CGO_ENABLED=0 $(GOBUILD) -ldflags="$(LDFLAGS)" -o $(OUTPUT_DIR)/freebsd/$(BINARY_NAME)-freebsd-arm64
@@ -161,19 +173,19 @@ build-bsd:
 # Android 编译
 .PHONY: build-android
 build-android:
-	@echo "Building Android..."
+	@echo "🤖 Building Android..."
 	@GOOS=android GOARCH=arm64 CGO_ENABLED=0 $(GOBUILD) -ldflags="$(LDFLAGS)" -o $(OUTPUT_DIR)/android/$(BINARY_NAME)-android-arm64
 	@GOOS=android GOARCH=arm GOARM=7 CGO_ENABLED=0 $(GOBUILD) -ldflags="$(LDFLAGS)" -o $(OUTPUT_DIR)/android/$(BINARY_NAME)-android-armv7
 
 # 快速编译（当前目录，不输出到dist）
 .PHONY: build
 build: sync-icons
-	@echo "Quick build for current system..."
+	@echo "Quick build for current system [CGO=$(CGO_ENABLED)]..."
 ifeq ($(CURRENT_OS),windows)
-	@$(GOBUILD) -ldflags="$(LDFLAGS)" -o $(BINARY_NAME).exe
+	@CGO_ENABLED=$(CGO_ENABLED) $(GOBUILD) -ldflags="$(LDFLAGS)" -o $(BINARY_NAME).exe
 	@echo "Built: $(BINARY_NAME).exe"
 else
-	@$(GOBUILD) -ldflags="$(LDFLAGS)" -o $(BINARY_NAME)
+	@CGO_ENABLED=$(CGO_ENABLED) $(GOBUILD) -ldflags="$(LDFLAGS)" -o $(BINARY_NAME)
 	@echo "Built: $(BINARY_NAME)"
 endif
 
@@ -192,7 +204,7 @@ endif
 .PHONY: install
 install: sync-icons
 	@echo "Installing to $(GOPATH)/bin/$(BINARY_NAME)..."
-	@$(GOBUILD) -ldflags="$(LDFLAGS)" -o $(GOPATH)/bin/$(BINARY_NAME)
+	@CGO_ENABLED=$(CGO_ENABLED) $(GOBUILD) -ldflags="$(LDFLAGS)" -o $(GOPATH)/bin/$(BINARY_NAME)
 	@echo "Installed successfully!"
 	@echo ""
 	@echo "You can now run: $(BINARY_NAME)"
@@ -210,6 +222,7 @@ info:
 	@echo ""
 	@echo "Current System:  $(CURRENT_OS)/$(CURRENT_ARCH)"
 	@echo "Go Version:      $(shell go version)"
+	@echo "CGO Enabled:     $(CGO_ENABLED)"
 	@echo "Output Dir:      $(OUTPUT_DIR)"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
@@ -250,5 +263,11 @@ help:
 	@echo "  make run            # Build and run immediately"
 	@echo "  make build-all      # Build for all platforms"
 	@echo "  make clean build    # Clean and rebuild current system"
+	@echo ""
+	@echo "Important Notes:"
+	@echo "  - Linux/macOS builds need CGO for system tray support"
+	@echo "  - Cross-compilation will disable CGO (tray won't work)"
+	@echo "  - Build on target platform for full functionality"
+	@echo "  - Use build.sh for better cross-platform support"
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

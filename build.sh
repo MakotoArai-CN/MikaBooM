@@ -1,9 +1,9 @@
 #!/bin/bash
-
 # MikaBooM 完整交叉编译脚本
 # 支持多平台、多架构的CLI版本
 
-set -e
+# 注释掉 set -e，因为我们要手动处理错误
+# set -e
 
 # 版本信息
 VERSION="1.0.0"
@@ -11,6 +11,11 @@ BUILD_DATE=$(date +"%Y-%m-%d %H:%M:%S")
 COMMIT_HASH=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 OUTPUT_DIR="dist"
 BINARY_NAME="MikaBooM"
+
+# 编译统计
+BUILD_SUCCESS=0
+BUILD_FAILED=0
+FAILED_TARGETS=()
 
 # 颜色定义
 RED='\033[0;31m'
@@ -74,6 +79,24 @@ check_dependencies() {
         print_warning "未找到 Git，将无法获取提交信息"
     fi
     
+    # 检查系统特定依赖
+    case "$(uname -s)" in
+        Linux*)
+            print_info "检测到 Linux 系统"
+            # 检查是否安装了必要的开发库
+            if ! ldconfig -p 2>/dev/null | grep -q libappindicator; then
+                print_warning "未检测到 libappindicator，系统托盘可能无法工作"
+                print_info "建议安装: sudo apt-get install libappindicator3-dev libgtk-3-dev"
+            fi
+            ;;
+        Darwin*)
+            print_info "检测到 macOS 系统"
+            ;;
+        MINGW*|MSYS*|CYGWIN*)
+            print_info "检测到 Windows 系统"
+            ;;
+    esac
+    
     echo ""
 }
 
@@ -86,7 +109,11 @@ setup_directories() {
     mkdir -p ${OUTPUT_DIR}/darwin
     mkdir -p ${OUTPUT_DIR}/freebsd
     mkdir -p ${OUTPUT_DIR}/openbsd
+    mkdir -p ${OUTPUT_DIR}/netbsd
     mkdir -p ${OUTPUT_DIR}/android
+    mkdir -p ${OUTPUT_DIR}/solaris
+    mkdir -p ${OUTPUT_DIR}/aix
+    mkdir -p ${OUTPUT_DIR}/plan9
     print_success "目录创建完成"
     echo ""
 }
@@ -94,7 +121,6 @@ setup_directories() {
 # 同步图标文件
 sync_icons() {
     print_info "同步图标文件..."
-    
     local SRC_DIR="src"
     local DEST_DIR="internal/tray/assets"
     
@@ -154,19 +180,18 @@ sync_icons() {
 get_ldflags() {
     local BUILD_TIME=$(date +"%Y-%m-%d %H:%M:%S")
     
-    # 使用纯 bash 计算
+    # 使用纯 bash 计算过期时间（2年后）
     local YEAR=$(date +%Y)
     local MONTH=$(date +%m)
     local DAY=$(date +%d)
     local TIME=$(date +%H:%M:%S)
-    
     local EXPIRE_YEAR=$((YEAR + 2))
     local EXPIRE_TIME="${EXPIRE_YEAR}-${MONTH}-${DAY} ${TIME}"
     
     echo "-s -w -X 'MikaBooM/internal/version.Version=${VERSION}' -X 'MikaBooM/internal/version.BuildDate=${BUILD_TIME}' -X 'MikaBooM/internal/version.ExpireDate=${EXPIRE_TIME}'"
 }
 
-# 编译函数
+# 编译函数（带错误处理）
 build_target() {
     local GOOS=$1
     local GOARCH=$2
@@ -192,26 +217,80 @@ build_target() {
     # 设置环境变量
     export GOOS=${GOOS}
     export GOARCH=${GOARCH}
-    export CGO_ENABLED=0
+    
+    # 根据平台设置 CGO
+    if [ "${GOOS}" = "windows" ]; then
+        export CGO_ENABLED=0
+    elif [ "${GOOS}" = "linux" ] || [ "${GOOS}" = "darwin" ]; then
+        # 检查是否在目标平台上编译
+        CURRENT_OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+        if [[ "${CURRENT_OS}" == *"${GOOS}"* ]]; then
+            export CGO_ENABLED=1
+        else
+            # 跨平台编译，禁用 CGO
+            export CGO_ENABLED=0
+        fi
+    else
+        export CGO_ENABLED=0
+    fi
     
     if [ -n "${ARM_VERSION}" ]; then
         export GOARM=${ARM_VERSION}
+    else
+        unset GOARM
     fi
     
-    # 编译
-    print_info "编译 ${GOOS}/${GOARCH}${ARM_VERSION:+v$ARM_VERSION}${EXTRA_NAME:+ ($EXTRA_NAME)}..."
+    # 构建目标名称用于显示
+    local TARGET_NAME="${GOOS}/${GOARCH}"
+    if [ -n "${ARM_VERSION}" ]; then
+        TARGET_NAME="${TARGET_NAME}v${ARM_VERSION}"
+    fi
+    if [ -n "${EXTRA_NAME}" ]; then
+        TARGET_NAME="${TARGET_NAME} (${EXTRA_NAME})"
+    fi
     
-    if go build -ldflags="$(get_ldflags)" -o "${OUTPUT_PATH}" 2>/dev/null; then
-        # 获取文件大小
+    # 编译（显示详细错误）
+    print_info "编译 ${TARGET_NAME} [CGO=${CGO_ENABLED}]..."
+    
+    # 临时文件存储错误信息
+    local ERROR_LOG=$(mktemp)
+    
+    # 执行编译，捕获错误
+    if go build -ldflags="$(get_ldflags)" -o "${OUTPUT_PATH}" 2>"${ERROR_LOG}"; then
+        # 编译成功，检查文件是否存在
         if [ -f "${OUTPUT_PATH}" ]; then
             SIZE=$(du -h "${OUTPUT_PATH}" | cut -f1)
             print_success "${OUTPUT_NAME} (${SIZE})"
+            rm -f "${ERROR_LOG}"
+            BUILD_SUCCESS=$((BUILD_SUCCESS + 1))
             return 0
+        else
+            print_error "编译失败: ${TARGET_NAME} - 输出文件不存在"
+            BUILD_FAILED=$((BUILD_FAILED + 1))
+            FAILED_TARGETS+=("${TARGET_NAME}")
+            rm -f "${ERROR_LOG}"
+            return 1
         fi
+    else
+        # 编译失败
+        print_error "编译失败: ${TARGET_NAME}"
+        
+        # 显示错误详情（只显示前20行，避免刷屏）
+        if [ -s "${ERROR_LOG}" ]; then
+            echo -e "${RED}错误详情:${NC}"
+            head -20 "${ERROR_LOG}" | sed 's/^/  /'
+            local LINE_COUNT=$(wc -l < "${ERROR_LOG}")
+            if [ "${LINE_COUNT}" -gt 20 ]; then
+                echo -e "${YELLOW}  ... (还有 $((LINE_COUNT - 20)) 行错误信息被省略)${NC}"
+            fi
+        fi
+        echo ""
+        
+        rm -f "${ERROR_LOG}"
+        BUILD_FAILED=$((BUILD_FAILED + 1))
+        FAILED_TARGETS+=("${TARGET_NAME}")
+        return 1
     fi
-    
-    print_error "编译失败: ${GOOS}/${GOARCH}${ARM_VERSION:+v$ARM_VERSION}"
-    return 1
 }
 
 # Windows 平台编译
@@ -220,10 +299,10 @@ build_windows() {
     echo -e "${BLUE}🪟 Windows 平台${NC}"
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     
-    build_target "windows" "amd64" "" ""           # 64位 x86-64
-    build_target "windows" "386" "" ""             # 32位 x86
-    build_target "windows" "arm64" "" ""           # ARM64
-    build_target "windows" "arm" "7" ""            # ARM32 v7
+    build_target "windows" "amd64" "" "" || true
+    build_target "windows" "386" "" "" || true
+    build_target "windows" "arm64" "" "" || true
+    build_target "windows" "arm" "7" "" || true
     
     echo ""
 }
@@ -234,34 +313,41 @@ build_linux() {
     echo -e "${GREEN}🐧 Linux 平台${NC}"
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     
+    # 检查是否在 Linux 上编译
+    CURRENT_OS=$(uname -s)
+    if [ "${CURRENT_OS}" != "Linux" ]; then
+        print_warning "非 Linux 系统编译 Linux 版本，系统托盘功能将不可用"
+        print_warning "建议在 Linux 系统上编译或使用 Docker"
+    fi
+    
     # x86/x64 架构
-    build_target "linux" "amd64" "" ""             # 64位 x86-64
-    build_target "linux" "386" "" ""               # 32位 x86
+    build_target "linux" "amd64" "" "" || true
+    build_target "linux" "386" "" "" || true
     
     # ARM 架构
-    build_target "linux" "arm64" "" ""             # ARM64 (ARMv8)
-    build_target "linux" "arm" "7" ""              # ARM32 v7 (树莓派2/3)
-    build_target "linux" "arm" "6" ""              # ARM32 v6 (树莓派1)
-    build_target "linux" "arm" "5" ""              # ARM32 v5 (旧设备)
+    build_target "linux" "arm64" "" "" || true
+    build_target "linux" "arm" "7" "" || true
+    build_target "linux" "arm" "6" "" || true
+    build_target "linux" "arm" "5" "" || true
     
     # MIPS 架构（路由器）
-    build_target "linux" "mips" "" ""              # MIPS 大端
-    build_target "linux" "mipsle" "" ""            # MIPS 小端
-    build_target "linux" "mips64" "" ""            # MIPS64 大端
-    build_target "linux" "mips64le" "" ""          # MIPS64 小端
+    build_target "linux" "mips" "" "" || true
+    build_target "linux" "mipsle" "" "" || true
+    build_target "linux" "mips64" "" "" || true
+    build_target "linux" "mips64le" "" "" || true
     
     # PowerPC 架构
-    build_target "linux" "ppc64" "" ""             # PowerPC 64位 大端
-    build_target "linux" "ppc64le" "" ""           # PowerPC 64位 小端
+    build_target "linux" "ppc64" "" "" || true
+    build_target "linux" "ppc64le" "" "" || true
     
     # RISC-V 架构
-    build_target "linux" "riscv64" "" ""           # RISC-V 64位
+    build_target "linux" "riscv64" "" "" || true
     
     # S390X 架构（IBM大型机）
-    build_target "linux" "s390x" "" ""             # IBM S390X
+    build_target "linux" "s390x" "" "" || true
     
     # LoongArch 架构（龙芯）
-    build_target "linux" "loong64" "" ""           # 龙芯 64位
+    build_target "linux" "loong64" "" "" || true
     
     echo ""
 }
@@ -272,8 +358,15 @@ build_darwin() {
     echo -e "${YELLOW}🍎 macOS 平台${NC}"
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     
-    build_target "darwin" "amd64" "" ""            # Intel Mac
-    build_target "darwin" "arm64" "" ""            # Apple Silicon (M1/M2/M3)
+    # 检查是否在 macOS 上编译
+    CURRENT_OS=$(uname -s)
+    if [ "${CURRENT_OS}" != "Darwin" ]; then
+        print_warning "非 macOS 系统编译 macOS 版本，系统托盘功能将不可用"
+        print_warning "建议在 macOS 系统上编译"
+    fi
+    
+    build_target "darwin" "amd64" "" "" || true
+    build_target "darwin" "arm64" "" "" || true
     
     echo ""
 }
@@ -285,21 +378,21 @@ build_bsd() {
     echo -e "${MAGENTA}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     
     # FreeBSD
-    build_target "freebsd" "amd64" "" ""           # FreeBSD 64位
-    build_target "freebsd" "386" "" ""             # FreeBSD 32位
-    build_target "freebsd" "arm64" "" ""           # FreeBSD ARM64
-    build_target "freebsd" "arm" "7" ""            # FreeBSD ARM32
+    build_target "freebsd" "amd64" "" "" || true
+    build_target "freebsd" "386" "" "" || true
+    build_target "freebsd" "arm64" "" "" || true
+    build_target "freebsd" "arm" "7" "" || true
     
     # OpenBSD
-    build_target "openbsd" "amd64" "" ""           # OpenBSD 64位
-    build_target "openbsd" "386" "" ""             # OpenBSD 32位
-    build_target "openbsd" "arm64" "" ""           # OpenBSD ARM64
-    build_target "openbsd" "arm" "7" ""            # OpenBSD ARM32
+    build_target "openbsd" "amd64" "" "" || true
+    build_target "openbsd" "386" "" "" || true
+    build_target "openbsd" "arm64" "" "" || true
+    build_target "openbsd" "arm" "7" "" || true
     
     # NetBSD
-    build_target "netbsd" "amd64" "" ""            # NetBSD 64位
-    build_target "netbsd" "386" "" ""              # NetBSD 32位
-    build_target "netbsd" "arm64" "" ""            # NetBSD ARM64
+    build_target "netbsd" "amd64" "" "" || true
+    build_target "netbsd" "386" "" "" || true
+    build_target "netbsd" "arm64" "" "" || true
     
     echo ""
 }
@@ -310,10 +403,10 @@ build_android() {
     echo -e "${CYAN}🤖 Android 平台${NC}"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     
-    build_target "android" "arm64" "" ""           # Android ARM64
-    build_target "android" "arm" "7" ""            # Android ARM32
-    build_target "android" "amd64" "" ""           # Android x86-64 (模拟器)
-    build_target "android" "386" "" ""             # Android x86 (模拟器)
+    build_target "android" "arm64" "" "" || true
+    build_target "android" "arm" "7" "" || true
+    build_target "android" "amd64" "" "" || true
+    build_target "android" "386" "" "" || true
     
     echo ""
 }
@@ -325,15 +418,15 @@ build_others() {
     echo -e "${WHITE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     
     # Solaris
-    build_target "solaris" "amd64" "" ""           # Solaris x86-64
+    build_target "solaris" "amd64" "" "" || true
     
     # AIX
-    build_target "aix" "ppc64" "" ""               # IBM AIX PowerPC
+    build_target "aix" "ppc64" "" "" || true
     
     # Plan 9
-    build_target "plan9" "amd64" "" ""             # Plan 9 x86-64
-    build_target "plan9" "386" "" ""               # Plan 9 x86
-    build_target "plan9" "arm" "" ""               # Plan 9 ARM
+    build_target "plan9" "amd64" "" "" || true
+    build_target "plan9" "386" "" "" || true
+    build_target "plan9" "arm" "" "" || true
     
     echo ""
 }
@@ -344,18 +437,27 @@ create_archives() {
     
     cd ${OUTPUT_DIR}
     
+    local archive_count=0
+    
     # 为每个平台创建 tar.gz 压缩包
-    for platform in windows linux darwin freebsd openbsd android; do
-        if [ -d "${platform}" ] && [ "$(ls -A ${platform})" ]; then
-            tar -czf "${BINARY_NAME}-${VERSION}-${platform}.tar.gz" ${platform}/
-            print_success "创建 ${BINARY_NAME}-${VERSION}-${platform}.tar.gz"
+    for platform in windows linux darwin freebsd openbsd netbsd android solaris aix plan9; do
+        if [ -d "${platform}" ] && [ "$(ls -A ${platform} 2>/dev/null)" ]; then
+            if tar -czf "${BINARY_NAME}-${VERSION}-${platform}.tar.gz" ${platform}/ 2>/dev/null; then
+                print_success "创建 ${BINARY_NAME}-${VERSION}-${platform}.tar.gz"
+                archive_count=$((archive_count + 1))
+            else
+                print_warning "创建 ${platform} 压缩包失败"
+            fi
         fi
     done
     
     # 创建一个包含所有平台的总压缩包
-    if [ "$(ls -A .)" ]; then
-        tar -czf "${BINARY_NAME}-${VERSION}-all.tar.gz" */
-        print_success "创建 ${BINARY_NAME}-${VERSION}-all.tar.gz"
+    if [ ${archive_count} -gt 0 ]; then
+        if tar -czf "${BINARY_NAME}-${VERSION}-all.tar.gz" */ 2>/dev/null; then
+            print_success "创建 ${BINARY_NAME}-${VERSION}-all.tar.gz"
+        fi
+    else
+        print_warning "没有成功编译的文件，跳过创建总压缩包"
     fi
     
     cd ..
@@ -368,10 +470,16 @@ generate_checksums() {
     
     cd ${OUTPUT_DIR}
     
-    # 生成每个文件的校验和
-    find . -type f \( -name "*.exe" -o -name "${BINARY_NAME}-*" \) ! -name "*.tar.gz" -exec sha256sum {} \; > SHA256SUMS.txt
+    # 查找所有可执行文件
+    local file_count=$(find . -type f \( -name "*.exe" -o -name "${BINARY_NAME}-*" \) ! -name "*.tar.gz" ! -name "SHA256SUMS.txt" 2>/dev/null | wc -l)
     
-    print_success "校验和已保存到 SHA256SUMS.txt"
+    if [ ${file_count} -gt 0 ]; then
+        # 生成每个文件的校验和
+        find . -type f \( -name "*.exe" -o -name "${BINARY_NAME}-*" \) ! -name "*.tar.gz" ! -name "SHA256SUMS.txt" -exec sha256sum {} \; > SHA256SUMS.txt 2>/dev/null
+        print_success "校验和已保存到 SHA256SUMS.txt (${file_count} 个文件)"
+    else
+        print_warning "没有可执行文件，跳过生成校验和"
+    fi
     
     cd ..
     echo ""
@@ -384,31 +492,61 @@ show_statistics() {
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     
     # 统计各平台文件数量
-    for platform in windows linux darwin freebsd openbsd netbsd android; do
+    local has_output=false
+    for platform in windows linux darwin freebsd openbsd netbsd android solaris aix plan9; do
         if [ -d "${OUTPUT_DIR}/${platform}" ]; then
-            COUNT=$(find ${OUTPUT_DIR}/${platform} -type f | wc -l)
+            COUNT=$(find ${OUTPUT_DIR}/${platform} -type f 2>/dev/null | wc -l)
             if [ ${COUNT} -gt 0 ]; then
-                SIZE=$(du -sh ${OUTPUT_DIR}/${platform} | cut -f1)
+                SIZE=$(du -sh ${OUTPUT_DIR}/${platform} 2>/dev/null | cut -f1)
                 printf "%-10s: %2d 个文件, 总大小: %s\n" ${platform} ${COUNT} ${SIZE}
+                has_output=true
             fi
         fi
     done
     
+    if [ "$has_output" = false ]; then
+        print_warning "没有成功编译的文件"
+    fi
+    
     echo ""
     
     # 总统计
-    TOTAL_FILES=$(find ${OUTPUT_DIR} -type f \( -name "*.exe" -o -name "${BINARY_NAME}-*" \) ! -name "*.tar.gz" | wc -l)
-    TOTAL_SIZE=$(du -sh ${OUTPUT_DIR} | cut -f1)
+    TOTAL_FILES=$(find ${OUTPUT_DIR} -type f \( -name "*.exe" -o -name "${BINARY_NAME}-*" \) ! -name "*.tar.gz" 2>/dev/null | wc -l)
     
-    echo -e "${GREEN}总计: ${TOTAL_FILES} 个可执行文件${NC}"
-    echo -e "${GREEN}总大小: ${TOTAL_SIZE}${NC}"
+    if [ ${TOTAL_FILES} -gt 0 ]; then
+        TOTAL_SIZE=$(du -sh ${OUTPUT_DIR} 2>/dev/null | cut -f1)
+        echo -e "${GREEN}✅ 成功编译: ${BUILD_SUCCESS} 个目标${NC}"
+    else
+        echo -e "${YELLOW}⚠️  成功编译: ${BUILD_SUCCESS} 个目标${NC}"
+    fi
+    
+    if [ ${BUILD_FAILED} -gt 0 ]; then
+        echo -e "${RED}❌ 编译失败: ${BUILD_FAILED} 个目标${NC}"
+    fi
+    
+    if [ ${TOTAL_FILES} -gt 0 ]; then
+        echo -e "${CYAN}📦 总计: ${TOTAL_FILES} 个可执行文件${NC}"
+        echo -e "${CYAN}💾 总大小: ${TOTAL_SIZE}${NC}"
+    fi
+    
+    # 显示失败的目标列表
+    if [ ${BUILD_FAILED} -gt 0 ]; then
+        echo ""
+        echo -e "${RED}失败的编译目标:${NC}"
+        for target in "${FAILED_TARGETS[@]}"; do
+            echo -e "  ${RED}•${NC} ${target}"
+        done
+    fi
+    
     echo ""
 }
 
 # 清理函数
 cleanup() {
     print_info "清理临时文件..."
-    rm -f *.syso 2>/dev/null
+    rm -f *.syso 2>/dev/null || true
+    # 清理可能存在的临时错误日志文件
+    rm -f /tmp/tmp.* 2>/dev/null || true
     print_success "清理完成"
 }
 
@@ -433,7 +571,7 @@ selective_build() {
         4) build_bsd ;;
         5) build_android ;;
         6) build_others ;;
-        7) 
+        7)
             build_windows
             build_linux
             build_darwin
@@ -441,7 +579,7 @@ selective_build() {
             build_android
             build_others
             ;;
-        0) 
+        0)
             echo "退出编译"
             exit 0
             ;;
@@ -495,11 +633,17 @@ main() {
         esac
     fi
     
-    # 创建压缩包
-    create_archives
-    
-    # 生成校验和
-    generate_checksums
+    # 只在有成功编译的文件时才创建压缩包和校验和
+    if [ ${BUILD_SUCCESS} -gt 0 ]; then
+        # 创建压缩包
+        create_archives
+        
+        # 生成校验和
+        generate_checksums
+    else
+        print_warning "没有成功编译的文件，跳过创建压缩包和校验和"
+        echo ""
+    fi
     
     # 显示统计
     show_statistics
@@ -507,13 +651,41 @@ main() {
     # 清理
     cleanup
     
-    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${GREEN}✅ 编译完成！${NC}"
-    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    # 根据编译结果显示不同的结束信息
+    if [ ${BUILD_FAILED} -eq 0 ] && [ ${BUILD_SUCCESS} -gt 0 ]; then
+        echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${GREEN}✅ 编译全部成功！${NC}"
+        echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    elif [ ${BUILD_SUCCESS} -gt 0 ]; then
+        echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${YELLOW}⚠️  编译部分完成 (${BUILD_SUCCESS} 成功, ${BUILD_FAILED} 失败)${NC}"
+        echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    else
+        echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${RED}❌ 编译全部失败！${NC}"
+        echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        exit 1
+    fi
+    
     echo ""
-    echo "输出目录: ${OUTPUT_DIR}/"
-    echo "压缩包已创建，可用于分发"
+    
+    if [ ${BUILD_SUCCESS} -gt 0 ]; then
+        echo "输出目录: ${OUTPUT_DIR}/"
+        echo "压缩包已创建，可用于分发"
+        echo ""
+    fi
+    
+    echo -e "${YELLOW}提示:${NC}"
+    echo "  - Linux/macOS 版本需要在对应平台上编译以支持系统托盘（CGO）"
+    echo "  - 跨平台编译将自动禁用 CGO，系统托盘功能将不可用"
+    echo "  - Windows 版本使用纯 Go 实现，可在任何平台编译"
+    echo "  - 某些架构可能不受当前 Go 版本支持，会被自动跳过"
     echo ""
+    
+    # 如果有失败的编译，返回非零退出码
+    if [ ${BUILD_FAILED} -gt 0 ]; then
+        exit 2
+    fi
 }
 
 # 运行主函数

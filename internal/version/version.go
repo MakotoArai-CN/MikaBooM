@@ -13,9 +13,9 @@ import (
 // 在编译时可以通过 -ldflags 注入这些值
 // 例如: go build -ldflags "-X MikaBooM/internal/version.BuildDate=$(date +'%Y-%m-%d %H:%M:%S')"
 var (
-	Version    = "1.0.0"
+	Version    = "1.0.1"
 	BuildDate  = "2024-01-01 00:00:00" // 编译时自动更新
-	ExpireDate = "2026-01-01 23:59:59" // 编译时计算（BuildDate + 2年）
+	ExpireDate = "2027-01-01 23:59:59" // 编译时计算（BuildDate + 2年）
 	Author     = "Makoto"
 )
 
