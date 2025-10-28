@@ -59,6 +59,10 @@ jobs:
       - name: Install Dependencies (AMD64)
         if: matrix.arch == 'amd64'
         run: |
+
+          sudo sed -i 's|http://archive.ubuntu.com/ubuntu/|https://mirrors.aliyun.com/ubuntu/|g' /etc/apt/sources.list
+          sudo sed -i 's|http://security.ubuntu.com/ubuntu/|https://mirrors.aliyun.com/ubuntu/|g' /etc/apt/sources.list
+          # 添加国内镜像源
           sudo apt-get update
           sudo apt-get install -y \
             libgtk-3-dev \
