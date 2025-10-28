@@ -33,3 +33,8 @@ Thumbs.db
 
 # Config (optional, uncomment if you want to ignore config)
 # config.yaml
+
+# gitconfig
+.gitconfig
+.gitconfig.local
+.gitconfig.user
